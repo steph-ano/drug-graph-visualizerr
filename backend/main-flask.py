@@ -2,7 +2,7 @@ import json
 import pandas as pd
 import networkx as nx
 import itertools
-from flask import Flask, request, jsonify, abort
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 # --- CONFIGURACIÓN Y CONSTANTES ---
@@ -13,19 +13,20 @@ SIMILARITY_SAME_CLASS_ONLY = 0.5
 
 # --- INICIALIZACIÓN DE FLASK ---
 app = Flask(__name__)
-# Habilitar CORS para todas las rutas (Vital para conectar con Vue)
+# Habilitar CORS para permitir peticiones desde Vue (puerto 5173 o el que uses)
 CORS(app)
 
-# Contexto Global
+# Contexto Global para almacenar datos en memoria
 global_context = {
     "G": None,
     "df": None,
-    "search_index": {}
+    "search_index": {},
+    "filter_cache": {} # Caché para optimización
 }
 
-# --- LÓGICA DE NEGOCIO (Idéntica a tu versión anterior) ---
+# --- LÓGICA DE NEGOCIO ---
 def build_graph():
-    """Carga datos y construye el grafo."""
+    """Carga datos y construye el grafo incluyendo la razón de la conexión."""
     print("--- INICIANDO SERVIDOR (FLASK) ---")
     print(f"Cargando {DATA_FILE}...")
     
@@ -38,38 +39,48 @@ def build_graph():
             df[col] = df[col].str.strip()
 
         df = df.drop_duplicates(subset=['drug_name'])
-        df_clean = df.copy() # Copia para devolver datos
+        df_clean = df.copy()
         df = df.set_index('drug_name')
 
         G = nx.Graph()
+        # Agregar nodos
         for drug_name, row in df.iterrows():
-            # Convertimos NaN a None manualmente
             row_data = row.where(pd.notnull(row), None).to_dict()
             G.add_node(drug_name, **row_data)
 
         condition_map = df.groupby("medical_condition").groups
         class_map = df.groupby("drug_classes").groups
+        
         edges_to_add = {}
+        edge_reasons = {} # Diccionario para guardar el texto de la coincidencia
 
         print("Calculando relaciones...")
         
-        # Lógica de aristas
+        # Pase 1: misma condición
         for condition, drugs in condition_map.items():
             for drug1, drug2 in itertools.combinations(drugs, 2):
                 pair = tuple(sorted((drug1, drug2)))
                 edges_to_add[pair] = SIMILARITY_SAME_CONDITION_ONLY
+                edge_reasons[pair] = f"Condición: '{condition}'"
 
+        # Pase 2: misma clase
         for d_class, drugs in class_map.items():
             for drug1, drug2 in itertools.combinations(drugs, 2):
                 pair = tuple(sorted((drug1, drug2)))
                 if pair in edges_to_add:
                     edges_to_add[pair] = SIMILARITY_SAME_CONDITION_AND_CLASS
+                    # Si ya existía, agregamos la clase al texto
+                    edge_reasons[pair] += f" y Clase: '{d_class}'"
                 else:
                     edges_to_add[pair] = SIMILARITY_SAME_CLASS_ONLY
+                    edge_reasons[pair] = f"Clase: '{d_class}'"
 
+        # Añadir aristas con atributos
         for (drug1, drug2), similarity in edges_to_add.items():
             cost = 1.1 - similarity
-            G.add_edge(drug1, drug2, similarity=similarity, cost=cost)
+            reason_text = edge_reasons.get((drug1, drug2), "Desconocido")
+            # Guardamos 'reason' en la arista
+            G.add_edge(drug1, drug2, similarity=similarity, cost=cost, reason=reason_text)
 
         print(f"Grafo construido: {G.number_of_nodes()} nodos, {G.number_of_edges()} aristas.")
         
@@ -81,11 +92,10 @@ def build_graph():
         print("ERROR: No se encontró el archivo CSV.")
         return None, None, None
     except Exception as e:
-        print(f"Error inesperado: {e}")
+        print(f"Error inesperado cargando datos: {e}")
         return None, None, None
 
-# --- CARGA DE DATOS AL INICIO ---
-# En Flask, ejecutamos esto antes de que arranque el servidor
+# --- CARGA INICIAL ---
 G, df, search_idx = build_graph()
 global_context["G"] = G
 global_context["df"] = df
@@ -93,11 +103,10 @@ global_context["search_index"] = search_idx
 
 # --- HELPERS ---
 def get_real_name(name):
-    """Busca el nombre real (case-insensitive)"""
     if not name: return None
     return global_context["search_index"].get(name.lower().strip())
 
-# --- ENDPOINTS (RUTAS) ---
+# --- ENDPOINTS ---
 
 @app.route('/', methods=['GET'])
 def read_root():
@@ -107,37 +116,25 @@ def read_root():
 
 @app.route('/drugs/search', methods=['GET'])
 def search_drugs():
-    # En Flask, los query params (?query=...) están en request.args
     query = request.args.get('query', '').lower()
-    
-    matches = [
-        name for name in global_context["search_index"].values() 
-        if query in name.lower()
-    ]
+    matches = [name for name in global_context["search_index"].values() if query in name.lower()]
     return jsonify(matches[:20])
 
 @app.route('/drugs/<path:drug_name>', methods=['GET'])
 def get_drug_details(drug_name):
     real_name = get_real_name(drug_name)
     if not real_name:
-        # En Flask usamos jsonify con código de error manual
         return jsonify({"detail": "Medicamento no encontrado"}), 404
     
     df = global_context["df"]
     info = df[df['drug_name'] == real_name].iloc[0].to_dict()
-    
-    # Limpiar NaNs para JSON
     clean_info = {k: (v if pd.notnull(v) else None) for k, v in info.items()}
     return jsonify(clean_info)
 
 @app.route('/analysis/path', methods=['POST'])
 def get_shortest_path():
-    # En Flask, el body JSON se obtiene con request.get_json()
     data = request.get_json()
-    
-    # Validación manual (en FastAPI lo hacía Pydantic)
-    if not data:
-        return jsonify({"detail": "JSON inválido"}), 400
+    if not data: return jsonify({"detail": "JSON inválido"}), 400
         
     start_drug = data.get('start_drug')
     end_drug = data.get('end_drug')
@@ -162,8 +159,12 @@ def get_shortest_path():
                 u, v = path[i], path[i+1]
                 edge_data = G.get_edge_data(u, v)
                 sim = edge_data['similarity']
+                # Extraemos la razón guardada en build_graph
+                reason = edge_data.get('reason', 'N/A')
+                
                 total_similarity += sim
                 node_info["similarity_to_next"] = sim
+                node_info["reason"] = reason # Enviamos la razón al frontend
             
             result_path.append(node_info)
 
@@ -180,9 +181,7 @@ def get_shortest_path():
 
 @app.route('/analysis/alternatives/<path:drug_name>', methods=['GET'])
 def get_alternatives(drug_name):
-    # Obtener query param ?top_n=10, default 10
     top_n = int(request.args.get('top_n', 10))
-    
     G = global_context["G"]
     real_name = get_real_name(drug_name)
     
@@ -190,14 +189,9 @@ def get_alternatives(drug_name):
         return jsonify({"detail": "Medicamento no encontrado"}), 404
 
     neighbors = G[real_name]
-    if not neighbors:
-        return jsonify([])
+    if not neighbors: return jsonify([])
 
-    sorted_neighbors = sorted(
-        neighbors.items(), 
-        key=lambda item: item[1]['similarity'], 
-        reverse=True
-    )
+    sorted_neighbors = sorted(neighbors.items(), key=lambda item: item[1]['similarity'], reverse=True)
 
     results = []
     for neighbor_name, data in sorted_neighbors[:top_n]:
@@ -206,52 +200,76 @@ def get_alternatives(drug_name):
             "similarity": data['similarity'],
             "medical_condition": G.nodes[neighbor_name].get("medical_condition", "N/A")
         })
-        
     return jsonify(results)
 
 @app.route('/drugs/filter', methods=['POST'])
 def filter_drugs():
-    # Recibimos los datos
-    criteria = request.get_json() or {} # Si es None, usar dict vacío
+    criteria = request.get_json() or {}
     print(f"🔍 Filtro Recibido: {criteria}")
     
     df = global_context["df"]
-    results = df.copy()
-
-    try:
-        # Extracción manual de variables (En FastAPI era criteria.condition)
-        cond = criteria.get('condition')
-        preg = criteria.get('pregnancy_category')
-        rx = criteria.get('rx_otc')
-        csa_val = criteria.get('csa')
-
-        if cond:
-            results = results[results['medical_condition'].astype(str).str.contains(cond, case=False, na=False)]
-
-        if preg:
-            val = preg.upper().strip()
-            results = results[results['pregnancy_category'].astype(str).str.upper() == val]
-
-        if rx:
-            val = rx.upper().strip()
-            results = results[results['rx_otc'].astype(str).str.upper().str.contains(val, na=False)]
-
-        if csa_val:
-            val = csa_val.upper().strip()
-            results = results[results['csa'].astype(str).str.upper() == val]
-
-        results = results.head(100)
-        print(f"✅ Resultados: {len(results)}")
-
-        # Retornar JSON seguro manejando NaNs
+    cache = global_context["filter_cache"]
+    
+    # 1. Verificar Cache Total
+    cache_key = tuple(sorted(criteria.items()))
+    if cache_key in cache:
+        print("💡 Resultado obtenido desde el caché.")
+        results = cache[cache_key].head(100)
         return json.loads(results.to_json(orient="records"))
 
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        return jsonify({"detail": "Error interno del servidor"}), 500
+    # 2. Programación Dinámica (Cache por Columna)
+    if "dp" not in cache: cache["dp"] = {}
+    dp = cache["dp"]
+    
+    partial_results = []
+    
+    # Extraer filtros
+    cond = criteria.get('condition')
+    preg = criteria.get('pregnancy_category')
+    rx = criteria.get('rx_otc')
+    csa_val = criteria.get('csa')
 
-# --- EJECUCIÓN ---
+    # Procesar Condition
+    if cond:
+        val = cond.lower().strip()
+        if ('condition', val) not in dp:
+            dp[('condition', val)] = df[df['medical_condition'].astype(str).str.contains(val, case=False, na=False)]
+        partial_results.append(dp[('condition', val)])
+
+    # Procesar Pregnancy
+    if preg:
+        val = preg.upper().strip()
+        if ('preg_cat', val) not in dp:
+            dp[('preg_cat', val)] = df[df['pregnancy_category'].astype(str).str.upper() == val]
+        partial_results.append(dp[('preg_cat', val)])
+
+    # Procesar Rx
+    if rx:
+        val = rx.upper().strip()
+        if ('rx_otc', val) not in dp:
+            dp[('rx_otc', val)] = df[df['rx_otc'].astype(str).str.upper().str.contains(val, na=False)]
+        partial_results.append(dp[('rx_otc', val)])
+
+    # Procesar CSA
+    if csa_val:
+        val = csa_val.upper().strip()
+        if ('csa', val) not in dp:
+            dp[('csa', val)] = df[df['csa'].astype(str).str.upper() == val]
+        partial_results.append(dp[('csa', val)])
+
+    # 3. Intersección de Resultados
+    if not partial_results:
+        final = df.copy()
+    else:
+        final = partial_results[0]
+        for sub in partial_results[1:]:
+            final = pd.merge(final, sub, how='inner', on=list(final.columns))
+            
+    # Guardar en cache y retornar
+    cache[cache_key] = final.copy() 
+    results = final.head(100)
+    
+    return json.loads(results.to_json(orient="records"))
+
 if __name__ == '__main__':
-    # debug=True permite que el servidor se reinicie si cambias el código
-    # port=8000 mantiene compatibilidad con tu Frontend actual
     app.run(host='0.0.0.0', port=8000, debug=True)

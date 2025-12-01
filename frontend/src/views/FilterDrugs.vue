@@ -2,7 +2,6 @@
 import { ref } from 'vue';
 import api from '../services/api';
 
-// Modelo de datos del formulario
 const filters = ref({
   condition: '',
   pregnancy_category: '',
@@ -22,27 +21,22 @@ const applyFilter = async () => {
   results.value = [];
 
   try {
-    // 1. Limpiar el objeto: Eliminar claves vacías
     const payload = {};
     if (filters.value.condition.trim()) payload.condition = filters.value.condition;
     if (filters.value.pregnancy_category) payload.pregnancy_category = filters.value.pregnancy_category;
     if (filters.value.rx_otc) payload.rx_otc = filters.value.rx_otc;
     if (filters.value.csa) payload.csa = filters.value.csa;
 
-    console.log("Enviando payload:", payload); // Mira la consola del navegador (F12)
-
     const response = await api.filterDrugs(payload);
     results.value = response.data;
-    
   } catch (error) {
     console.error(error);
-    errorMsg.value = "Error al conectar con el servidor. Revisa la terminal de Python.";
+    errorMsg.value = "Error al conectar con el servidor.";
   } finally {
     loading.value = false;
   }
 };
 
-// Función para limpiar filtros
 const clearFilters = () => {
   filters.value = { condition: '', pregnancy_category: '', rx_otc: '', csa: '' };
   results.value = [];
@@ -54,21 +48,24 @@ const clearFilters = () => {
   <div class="filter-container">
     <h1>🔬 Buscador Avanzado</h1>
     
+    <!-- Tarjeta de Filtros -->
     <div class="card filter-card">
       <div class="form-grid">
         
-        <div class="form-group">
-          <label>Condición Médica:</label>
+        <!-- Condición Médica (Ocupa todo el ancho) -->
+        <div class="form-group full-width">
+          <label>Condición Médica</label>
           <input 
             v-model="filters.condition" 
             placeholder="Ej. Pain, Acne, Anxiety..." 
             @keyup.enter="applyFilter"
+            class="input-control"
           />
         </div>
 
         <div class="form-group">
-          <label>Categoría Embarazo:</label>
-          <select v-model="filters.pregnancy_category">
+          <label>Cat. Embarazo</label>
+          <select v-model="filters.pregnancy_category" class="input-control">
             <option value="">Todas</option>
             <option value="A">A (Sin riesgo)</option>
             <option value="B">B (Probablemente seguro)</option>
@@ -79,8 +76,8 @@ const clearFilters = () => {
         </div>
 
         <div class="form-group">
-          <label>Tipo de Acceso:</label>
-          <select v-model="filters.rx_otc">
+          <label>Acceso</label>
+          <select v-model="filters.rx_otc" class="input-control">
             <option value="">Cualquiera</option>
             <option value="Rx">Rx (Con Receta)</option>
             <option value="OTC">OTC (Venta Libre)</option>
@@ -88,40 +85,49 @@ const clearFilters = () => {
         </div>
 
         <div class="form-group">
-          <label>Clase CSA (Controlada):</label>
-          <select v-model="filters.csa">
+          <label>Clase CSA</label>
+          <select v-model="filters.csa" class="input-control">
             <option value="">Cualquiera</option>
             <option value="N">N (No controlada)</option>
-            <option value="2">2 (Alto potencial abuso)</option>
+            <option value="2">2</option>
             <option value="3">3</option>
             <option value="4">4</option>
             <option value="5">5</option>
           </select>
         </div>
+
       </div>
 
       <div class="actions">
-        <button @click="applyFilter" :disabled="loading" class="btn-search">
-          {{ loading ? 'Buscando...' : '🔎 Aplicar Filtros' }}
+        <button @click="clearFilters" class="btn-clear">
+          Limpiar Campos
         </button>
-        <button @click="clearFilters" class="btn-clear">Limpiar</button>
+        <button @click="applyFilter" :disabled="loading" class="btn-search">
+          {{ loading ? 'Buscando...' : '🔎 Buscar Medicamentos' }}
+        </button>
       </div>
     </div>
 
+    <!-- Mensaje de Error -->
     <div v-if="errorMsg" class="error-msg">{{ errorMsg }}</div>
 
+    <!-- Resultados -->
     <div v-if="searched" class="results-area">
-      <h3>Resultados encontrados: {{ results.length }}</h3>
-      
+      <div class="results-header">
+        <h3>Resultados encontrados</h3>
+        <span class="badge-count">{{ results.length }}</span>
+      </div>
+
       <div v-if="results.length === 0 && !loading" class="no-results">
-        No hay medicamentos que coincidan con estos criterios.
+        <span class="icon">📭</span>
+        <p>No se encontraron medicamentos con estos criterios.</p>
       </div>
 
       <div v-else class="table-responsive">
-        <table>
+        <table class="modern-table">
           <thead>
             <tr>
-              <th>Medicamento</th>
+              <th>Nombre</th>
               <th>Condición</th>
               <th>Emb.</th>
               <th>Tipo</th>
@@ -130,14 +136,16 @@ const clearFilters = () => {
           </thead>
           <tbody>
             <tr v-for="drug in results" :key="drug.drug_name">
-              <td class="fw-bold">{{ drug.drug_name }}</td>
+              <td class="drug-name-cell">{{ drug.drug_name }}</td>
               <td>{{ drug.medical_condition }}</td>
               <td>
-                <span :class="['badge', 'cat-' + drug.pregnancy_category]">
-                  {{ drug.pregnancy_category || '-' }}
+                <span :class="['badge-preg', 'cat-' + drug.pregnancy_category]">
+                  {{ drug.pregnancy_category || 'N/A' }}
                 </span>
               </td>
-              <td>{{ drug.rx_otc }}</td>
+              <td>
+                <span class="rx-badge">{{ drug.rx_otc }}</span>
+              </td>
               <td>{{ drug.csa }}</td>
             </tr>
           </tbody>
@@ -148,37 +156,63 @@ const clearFilters = () => {
 </template>
 
 <style scoped>
-.filter-container { max-width: 900px; margin: 0 auto; }
-.filter-card { padding: 20px; background: white; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+.filter-container { max-width: 900px; margin: 0 auto; padding-bottom: 3rem; }
 
-.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 20px; }
-.form-group { display: flex; flex-direction: column; }
-label { font-weight: 600; font-size: 0.9rem; margin-bottom: 5px; color: #555; }
-input, select { padding: 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 1rem; }
-input:focus, select:focus { outline: none; border-color: #42b983; box-shadow: 0 0 0 3px rgba(66, 185, 131, 0.1); }
+/* --- Tarjeta de Filtros --- */
+.filter-card { padding: 30px; background: white; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); margin-bottom: 2rem; border: 1px solid #f0f0f0; }
 
-.actions { display: flex; gap: 10px; justify-content: flex-end; }
-.btn-search { background: #42b983; color: white; padding: 10px 20px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; transition: background 0.2s; }
-.btn-search:hover { background: #3aa876; }
-.btn-clear { background: #e0e0e0; color: #333; padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; }
-.btn-clear:hover { background: #d0d0d0; }
+.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 25px; }
 
-.error-msg { color: #d32f2f; background: #ffebee; padding: 10px; border-radius: 6px; margin-top: 10px; }
-.results-area { margin-top: 30px; }
-.no-results { text-align: center; padding: 40px; color: #888; font-style: italic; background: #f9f9f9; border-radius: 8px; }
+/* Hace que el elemento ocupe todo el ancho disponible */
+.full-width { grid-column: 1 / -1; }
 
-.table-responsive { overflow-x: auto; }
-table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
-th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #eee; }
-th { background: #f8f9fa; font-weight: 600; color: #444; }
-tr:hover { background: #f1f8ff; }
-.fw-bold { font-weight: bold; color: #2c3e50; }
+.form-group { display: flex; flex-direction: column; gap: 8px; }
+label { font-weight: 600; font-size: 0.85rem; text-transform: uppercase; color: #95a5a6; letter-spacing: 0.5px; }
 
-/* Badges para categorías de embarazo */
-.badge { padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: bold; color: white; background: #999; }
+.input-control { padding: 12px; border: 1px solid #e0e0e0; border-radius: 8px; font-size: 1rem; color: #2c3e50; background: #fafafa; transition: all 0.2s; width: 100%; }
+.input-control:focus { outline: none; border-color: #2196f3; background: white; box-shadow: 0 0 0 3px rgba(33, 150, 243, 0.1); }
+
+/* Botones */
+.actions { display: flex; gap: 15px; justify-content: flex-end; padding-top: 10px; border-top: 1px solid #f5f5f5; }
+
+.btn-search { background: #2196f3; color: white; padding: 12px 25px; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; transition: background 0.2s, transform 0.1s; display: flex; align-items: center; gap: 8px; }
+.btn-search:hover:not(:disabled) { background: #1976d2; transform: translateY(-1px); }
+.btn-search:disabled { background: #bdc3c7; cursor: not-allowed; }
+
+.btn-clear { background: white; color: #7f8c8d; padding: 12px 20px; border: 1px solid #e0e0e0; border-radius: 8px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
+.btn-clear:hover { background: #f8f9fa; color: #333; border-color: #d0d0d0; }
+
+/* --- Resultados --- */
+.results-area { animation: fadeIn 0.3s ease-in-out; }
+.results-header { display: flex; align-items: center; gap: 10px; margin-bottom: 15px; }
+.results-header h3 { margin: 0; color: #2c3e50; font-size: 1.2rem; }
+.badge-count { background: #e3f2fd; color: #2196f3; padding: 2px 8px; border-radius: 10px; font-weight: bold; font-size: 0.9rem; }
+
+.no-results { text-align: center; padding: 40px; background: #fff; border-radius: 12px; color: #7f8c8d; border: 1px dashed #e0e0e0; }
+.no-results .icon { font-size: 2rem; display: block; margin-bottom: 10px; }
+
+/* --- Tabla --- */
+.table-responsive { overflow-x: auto; background: white; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); border: 1px solid #f0f0f0; }
+.modern-table { width: 100%; border-collapse: collapse; }
+
+.modern-table th { background: #f8f9fa; color: #444; font-weight: 600; text-align: left; padding: 15px; border-bottom: 2px solid #eee; white-space: nowrap; }
+.modern-table td { padding: 15px; border-bottom: 1px solid #f5f5f5; color: #555; font-size: 0.95rem; }
+.modern-table tr:last-child td { border-bottom: none; }
+.modern-table tr:hover { background-color: #f0f7ff; }
+
+.drug-name-cell { font-weight: bold; color: #2c3e50; }
+.rx-badge { font-size: 0.8rem; background: #f0f2f5; padding: 2px 6px; border-radius: 4px; color: #606266; border: 1px solid #dcdfe6; }
+
+/* --- Badges de Embarazo --- */
+.badge-preg { display: inline-block; padding: 4px 10px; border-radius: 20px; font-weight: bold; color: white; font-size: 0.8rem; text-align: center; min-width: 30px; }
 .cat-A { background: #2ecc71; }
 .cat-B { background: #3498db; }
 .cat-C { background: #f1c40f; color: #333; }
 .cat-D { background: #e67e22; }
 .cat-X { background: #e74c3c; }
+.cat-N { background: #95a5a6; }
+
+.error-msg { background: #ffebee; color: #c62828; padding: 15px; border-radius: 8px; margin-bottom: 20px; text-align: center; border: 1px solid #ffcdd2; }
+
+@keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 </style>
