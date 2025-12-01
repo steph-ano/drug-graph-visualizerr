@@ -20,8 +20,8 @@ SIMILARITY_SAME_CLASS_ONLY = 0.5           # Peso de arista: 0.5
 # --- 1. Carga y Construcción del Grafo ---
 def load_and_build_graph():
     """
-    Carga el CSV, limpia los datos y construye el grafo según las reglas
-    de ponderación del proyecto (1.0, 0.7, 0.5).
+    Carga el CSV, limpia los datos y construye el grafo guardando
+    la razón de la conexión (Condición o Clase).
     """
     print(f"Cargando dataset desde '{DATA_FILE}'...")
 
@@ -32,7 +32,6 @@ def load_and_build_graph():
         cols_to_check = ['drug_name', 'medical_condition', 'drug_classes']
         df = df.dropna(subset=cols_to_check)
 
-        # Quitar espacios en blanco
         for col in df.select_dtypes(include=['object']):
             df[col] = df[col].str.strip()
 
@@ -40,13 +39,10 @@ def load_and_build_graph():
         df = df.set_index('drug_name')
 
     except FileNotFoundError:
-        print(f"--- ERROR ---")
-        print(f"El archivo '{DATA_FILE}' no se encontró.")
+        print(f"--- ERROR ---: El archivo '{DATA_FILE}' no se encontró.")
         return None, None
-
     except Exception as e:
-        print(f"--- ERROR INESPERADO ---")
-        print(e)
+        print(f"--- ERROR INESPERADO ---: {e}")
         return None, None
 
     print(f"Datos cargados. {len(df)} medicamentos únicos encontrados.")
@@ -58,17 +54,19 @@ def load_and_build_graph():
     for drug_name, row in df.iterrows():
         G.add_node(drug_name, **row.to_dict())
 
-    # Mapas para combinaciones
     condition_map = df.groupby("medical_condition").groups
     class_map = df.groupby("drug_classes").groups
 
     edges_to_add = {}
+    edge_reasons = {} # Nuevo: Diccionario para guardar el texto de la coincidencia
 
     # Pase 1: misma condición
     for condition, drugs in condition_map.items():
         for drug1, drug2 in itertools.combinations(drugs, 2):
             pair = tuple(sorted((drug1, drug2)))
             edges_to_add[pair] = SIMILARITY_SAME_CONDITION_ONLY
+            # Guardamos la razón
+            edge_reasons[pair] = f"Condición: '{condition}'"
 
     # Pase 2: misma clase
     for d_class, drugs in class_map.items():
@@ -77,13 +75,20 @@ def load_and_build_graph():
 
             if pair in edges_to_add:
                 edges_to_add[pair] = SIMILARITY_SAME_CONDITION_AND_CLASS
+                # Si ya existía por condición, agregamos la clase al texto
+                edge_reasons[pair] += f" y Clase: '{d_class}'"
             else:
                 edges_to_add[pair] = SIMILARITY_SAME_CLASS_ONLY
+                # Si es nuevo, solo ponemos la clase
+                edge_reasons[pair] = f"Clase: '{d_class}'"
 
-    # Añadir aristas
+    # Añadir aristas con el atributo 'reason'
     for (drug1, drug2), similarity in edges_to_add.items():
         cost = 1.1 - similarity
-        G.add_edge(drug1, drug2, similarity=similarity, cost=cost)
+        reason_text = edge_reasons.get((drug1, drug2), "Desconocido")
+        
+        # Aquí agregamos 'reason=reason_text' a la arista
+        G.add_edge(drug1, drug2, similarity=similarity, cost=cost, reason=reason_text)
 
     print(f"✅ Grafo construido.")
     print(f" Nodos: {G.number_of_nodes()}")
@@ -123,16 +128,30 @@ def find_shortest_path(G, drug1, drug2, visualize=True):
         path = nx.shortest_path(G, source=drug1, target=drug2, weight='cost')
         sim_acumulada = 0
 
-        print("\n--- Ruta encontrada ---")
-        for i, drug in enumerate(path):
-            print(f" {i+1}. {drug}")
+        print("\n" + "="*60)
+        print(f" RUTA OPTIMIZADA: {drug1} -> {drug2}")
+        print("="*60)
 
-            if i < len(path) - 1:
-                sim = G.get_edge_data(path[i], path[i+1])['similarity']
-                sim_acumulada += sim
-                print(f"  | (Similitud: {sim:.1f})")
+        for i in range(len(path) - 1):
+            current_node = path[i]
+            next_node = path[i+1]
+            
+            # Obtener datos de la arista
+            edge_data = G.get_edge_data(current_node, next_node)
+            sim = edge_data['similarity']
+            reason = edge_data.get('reason', 'N/A') # Recuperamos la razón
+            
+            sim_acumulada += sim
 
-        print(f"\n**Peso Total (Similitud Acumulada): {sim_acumulada:.1f}**")
+            # Imprimir con formato detallado
+            print(f" {i+1}. [ {current_node} ] ---> [ {next_node} ]")
+            print(f"     └-> Similitud: {sim:.1f} | Coinciden en: {reason}")
+            print("-" * 60)
+        
+        # Imprimir el último nodo para cerrar visualmente
+        print(f" LLEGADA: [ {path[-1]} ]")
+
+        print(f"\n** Peso Total (Similitud Acumulada): {sim_acumulada:.1f} **")
 
         if visualize:
             plot_dijkstra_path(G, path)
@@ -256,35 +275,70 @@ def find_alternatives(G, drug, top_n=10):
 
 
 def filter_by_criteria(df, cache, **kwargs):
-    cache_key = tuple(sorted(kwargs.items()))
+    """
+    Versión optimizada con programación dinámica.
+    - DP por cada criterio individual.
+    """
 
+    # Cache general (ya estaba)
+    cache_key = tuple(sorted(kwargs.items()))
     if cache_key in cache:
         print("\n(Resultado obtenido desde el caché)")
         return cache[cache_key]
 
     print("\nRealizando búsqueda...")
 
-    results = df.copy()
+    # --- NUEVO: DP cache POR COLUMNA ---
+    if "dp" not in cache:
+        cache["dp"] = {     # dp[col][value] = subconjunto filtrado
+            "condition": {},
+            "preg_cat": {},
+            "rx_otc": {},
+            "csa": {},
+        }
+    dp = cache["dp"]
 
+    # Lista para ir uniendo resultados
+    partial_results = []
+
+    # --- Procesar cada filtro con DP ---
     if 'condition' in kwargs:
-        results = results[
-            results['medical_condition'].str.contains(kwargs['condition'], case=False, na=False)
-        ]
+        val = kwargs['condition'].lower()
+        if val not in dp["condition"]:
+            dp["condition"][val] = df[
+                df['medical_condition'].str.contains(val, case=False, na=False)
+            ]
+        partial_results.append(dp["condition"][val])
 
     if 'preg_cat' in kwargs:
         val = kwargs['preg_cat'].upper()
-        results = results[results['pregnancy_category'].str.upper() == val]
+        if val not in dp["preg_cat"]:
+            dp["preg_cat"][val] = df[df['pregnancy_category'].str.upper() == val]
+        partial_results.append(dp["preg_cat"][val])
 
     if 'rx_otc' in kwargs:
         val = kwargs['rx_otc'].upper()
-        results = results[results['rx_otc'].str.upper() == val]
+        if val not in dp["rx_otc"]:
+            dp["rx_otc"][val] = df[df['rx_otc'].str.upper() == val]
+        partial_results.append(dp["rx_otc"][val])
 
     if 'csa' in kwargs:
         val = kwargs['csa'].upper()
-        results = results[results['csa'].str.upper() == val]
+        if val not in dp["csa"]:
+            dp["csa"][val] = df[df['csa'].str.upper() == val]
+        partial_results.append(dp["csa"][val])
 
-    cache[cache_key] = results
-    return results
+    # --- Unir los resultados por intersección sin rescaneo ---
+    if not partial_results:
+        return df
+
+    final = partial_results[0]
+    for sub in partial_results[1:]:
+        final = pd.merge(final, sub, how='inner')
+
+    # Guardar combinación final en el cache principal
+    cache[cache_key] = final
+    return final
 
 
 def plot_alternatives_subgraph(G, origin_drug, alternative_nodes):
